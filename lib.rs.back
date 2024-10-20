@@ -1,0 +1,71 @@
+use log::info;
+use proxy_wasm::traits::*;
+use proxy_wasm::types::*;
+use url::Url;
+use std::collections::HashMap;
+use md5::{Md5, Digest};
+
+proxy_wasm::main! {{
+    proxy_wasm::set_log_level(LogLevel::Trace);
+    proxy_wasm::set_http_context(|_, _| -> Box<dyn HttpContext> { Box::new(MyHttpContext) });
+}}
+
+struct MyHttpContext;
+
+impl Context for MyHttpContext {}
+
+impl HttpContext for MyHttpContext {
+    fn on_http_request_headers(&mut self, _: usize, _: bool) -> Action {
+        if let Some(path) = self.get_http_request_header(":path") {
+            let base = Url::parse("http://example.com").ok();
+            let options = Url::options().base_url(base.as_ref());
+            
+            match options.parse(&path) {
+                Err(_) => {
+                    info!("Failed to parse URL");
+                    self.send_http_response(403, vec![], Some(b"Access forbidden.\n"));
+                    return Action::Pause;
+                },
+                Ok(url) => {
+                    let url_path = url.path();
+                    info!("Path: {}", url_path);
+
+                    let query_params: HashMap<String, String> = url.query_pairs()
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect();
+
+                    let secret = "abc123456789";
+                    
+                    if let (Some(key), Some(t)) = (query_params.get("key"), query_params.get("t")) {
+                        info!("key = {}", key);
+                        info!("t = {}", t);
+
+                        let mut hasher = Md5::new();
+                        hasher.update(secret);
+                        hasher.update(url_path);
+                        hasher.update(t);
+                        let result = format!("{:x}", hasher.finalize());
+
+                        if &result == key {
+                            info!("Hash matches key");
+                            return Action::Continue;
+                        } else {
+                            info!("Hash does not match key");
+                            info!("Calculated hash: {}", result);
+                            self.send_http_response(403, vec![], Some(b"Access forbidden.\n"));
+                            return Action::Pause;
+                        }
+                    } else {
+                        info!("Missing 'key' or 't' parameter");
+                        self.send_http_response(403, vec![], Some(b"Access forbidden.\n"));
+                        return Action::Pause;
+                    }
+                }
+            }
+        }
+
+        // If we couldn't get the path, we'll also forbid access
+        self.send_http_response(403, vec![], Some(b"Access forbidden.\n"));
+        Action::Pause
+    }
+}
